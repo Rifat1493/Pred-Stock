@@ -47,7 +47,7 @@ def load_industry_map() -> Dict[str, str]:
 	industry_map = {
 		ticker: sector[:5]
 		for ticker, sector in zip(info[ticker_col], info[sector_col])
-		if ticker
+		if ticker and sector and sector.lower() != "nan"
 	}
 	return industry_map
 
