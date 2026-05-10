@@ -128,7 +128,9 @@ def get_ranked_stock_data(
 
 	day_data = yf.download(
 		ranked_tickers,
-		period=f"{day_period_years}y",
+		# period=f"{day_period_years}y",
+		period="6mo",
+		interval="1d",
 		progress=False,
 		group_by="ticker",
 		auto_adjust=False,
