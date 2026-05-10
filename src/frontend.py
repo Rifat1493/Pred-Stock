@@ -1,17 +1,41 @@
 from __future__ import annotations
 
-import streamlit as st
+import pandas as pd
 import plotly.express as px
+import streamlit as st
 
 from src import backend
 
 
 @st.cache_data(show_spinner=False)
 def _load_data():
-	df = backend.load_all_stock_data()
+	dividend_df = backend.load_dividend_data()
 	industry_map = backend.load_industry_map()
-	groups = backend.build_ticker_groups(df, group_size=10)
-	return df, industry_map, groups
+
+	if dividend_df.empty:
+		return pd.DataFrame(), dividend_df, industry_map, [], []
+
+	ticker_col = None
+	for col in dividend_df.columns:
+		if col.strip().lower() in {"ticker", "symbol"}:
+			ticker_col = col
+			break
+
+	if ticker_col is None:
+		return pd.DataFrame(), dividend_df, industry_map, [], []
+
+	dividend_tickers = (
+		dividend_df[ticker_col]
+		.astype(str)
+		.str.strip()
+		.str.upper()
+		.dropna()
+		.tolist()
+	)
+
+	day_df, ranked_tickers = backend.get_ranked_stock_data(dividend_tickers)
+	groups = backend.build_ticker_groups(day_df, group_size=10) if not day_df.empty else []
+	return day_df, dividend_df, industry_map, groups, ranked_tickers
 
 
 def _format_labels(tickers, industry_map):
@@ -30,18 +54,8 @@ def _render_exploration():
 	if "page_index" not in st.session_state:
 		st.session_state.page_index = 0
 
-	update_clicked = st.button("Update Data")
-	if update_clicked:
-		with st.spinner("Updating all_stock_data.csv..."):
-			ok, message = backend.update_all_stock_data()
-		if ok:
-			st.cache_data.clear()
-			st.success(message)
-		else:
-			st.warning(message)
-
-	df, industry_map, groups = _load_data()
-	if not groups:
+	day_df, _, industry_map, groups, _ = _load_data()
+	if day_df.empty or not groups:
 		st.info("No tickers available to plot.")
 		return
 
@@ -62,11 +76,11 @@ def _render_exploration():
 	tickers = groups[st.session_state.page_index]
 	labels = _format_labels(tickers, industry_map)
 
-	plot_df = df[tickers].copy()
+	plot_df = day_df[tickers].copy()
 	plot_df = plot_df.rename(columns=labels)
-	long_df = plot_df.reset_index().melt(
-		id_vars="Date", var_name="Ticker", value_name="Price"
-	)
+	plot_df.index.name = "Date"
+	plot_df = plot_df.reset_index()
+	long_df = plot_df.melt(id_vars="Date", var_name="Ticker", value_name="Price")
 
 	fig = px.line(
 		long_df,
@@ -75,6 +89,7 @@ def _render_exploration():
 		color="Ticker",
 		title="Prices by Ticker (10 per page)",
 	)
+	fig.update_traces(visible="legendonly")
 	fig.update_layout(legend_title_text="Ticker (Industry)")
 
 	chart_container = st.container(height=620)
@@ -84,77 +99,25 @@ def _render_exploration():
 
 def _render_dividends():
 	st.markdown("### Dividends")
-	st.markdown("**Watchlist**")
-	st.markdown(
-		"""
-		<style>
-		button[title="Remove from watchlist"] {
-			position: relative !important;
-			width: 100% !important;
-			min-height: 44px !important;
-			padding: 10px 28px 10px 14px !important;
-			border-radius: 999px !important;
-			background: #1e1e2e !important;
-			border: 1px solid #3a3a5c !important;
-			color: #f4f4ff !important;
-			font-weight: 600 !important;
-			text-align: left !important;
-		}
-		button[title="Remove from watchlist"]::after {
-			content: "×";
-			position: absolute;
-			top: 6px;
-			right: 8px;
-			width: 18px;
-			height: 18px;
-			border-radius: 999px;
-			background: #0f111a;
-			border: 1px solid #3a3a5c;
-			color: #f4f4ff;
-			font-size: 12px;
-			line-height: 16px;
-			text-align: center;
-		}
-		button[title="Remove from watchlist"]:hover {
-			background: #4f46e5 !important;
-			border-color: #4f46e5 !important;
-		}
-		button[title="Remove from watchlist"]:hover::after {
-			background: #1e1e2e;
-			border-color: #1e1e2e;
-		}
-		</style>
-		""",
-		unsafe_allow_html=True,
-	)
+	_, dividend_df, _, _, ranked_tickers = _load_data()
+	if dividend_df.empty or not ranked_tickers:
+		st.info("No dividend data available to show.")
+		return
 
-	watchlist = backend.load_filtered_tickers()
-	if not watchlist:
-		st.write("None")
-	else:
-		per_row = 5
-		for start in range(0, len(watchlist), per_row):
-			row = watchlist[start : start + per_row]
-			cols = st.columns(per_row)
-			for col, ticker in zip(cols, row):
-				with col:
-					if st.button(ticker, key=f"remove_{ticker}", help="Remove from watchlist"):
-						ok, message, _ = backend.remove_filtered_ticker(ticker)
-						if ok:
-							st.success(message)
-						else:
-							st.warning(message)
-						st.rerun()
+	ticker_col = None
+	for col in dividend_df.columns:
+		if col.strip().lower() in {"ticker", "symbol"}:
+			ticker_col = col
+			break
 
-	st.markdown("---")
-	new_ticker = st.text_input("Add ticker", placeholder="e.g., CNR.TO")
-	if st.button("Add to watchlist"):
-		ok, message, _ = backend.add_filtered_ticker(new_ticker)
-		if ok:
-			st.success(message)
-			st.rerun()
-		else:
-			st.warning(message)
+	if ticker_col is None:
+		st.info("Dividend data is missing a ticker column.")
+		return
+
+	filtered = dividend_df[
+		dividend_df[ticker_col].astype(str).str.upper().isin(set(ranked_tickers))
+	].copy()
+	st.dataframe(filtered, use_container_width=True)
 
 
 def render_app() -> None:

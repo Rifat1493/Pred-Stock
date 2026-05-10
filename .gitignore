@@ -1,0 +1,7 @@
+/azure_function
+/.devcontainer
+/.vscode
+/.venv
+/deploy
+/__pychache__
+/src/__pychache__

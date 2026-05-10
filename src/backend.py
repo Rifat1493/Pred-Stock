@@ -12,6 +12,7 @@ DATA_DIR = ROOT_DIR / "data"
 ALL_STOCK_DATA_PATH = DATA_DIR / "all_stock_data.csv"
 TICKER_INFO_PATH = DATA_DIR / "tsx_tickers_extracted.csv"
 FILTERED_TICKERS_PATH = DATA_DIR / "filtered_tickers.csv"
+DIVIDEND_DATA_PATH = DATA_DIR / "dividend_data.csv"
 
 
 def load_all_stock_data() -> pd.DataFrame:
@@ -23,6 +24,121 @@ def load_all_stock_data() -> pd.DataFrame:
 	df = df.dropna(subset=["Date"]).sort_values("Date")
 	df = df.set_index("Date")
 	return df
+
+
+def load_dividend_data() -> pd.DataFrame:
+	if not DIVIDEND_DATA_PATH.exists():
+		return pd.DataFrame()
+
+	data = pd.read_csv(DIVIDEND_DATA_PATH)
+	if data.empty:
+		return data
+
+	ticker_col = None
+	for col in data.columns:
+		if col.strip().lower() in {"ticker", "symbol"}:
+			ticker_col = col
+			break
+
+	if ticker_col is None:
+		return pd.DataFrame()
+
+	data[ticker_col] = data[ticker_col].astype(str).str.strip().str.upper()
+	return data
+
+
+def _extract_close(data: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
+	if data.empty:
+		return pd.DataFrame()
+
+	is_multi = isinstance(data.columns, pd.MultiIndex)
+	frames = {}
+	for ticker in tickers:
+		if is_multi:
+			if ticker not in data.columns.get_level_values(0):
+				continue
+			if not data[ticker]["Close"].isna().all():
+				frames[ticker] = data[ticker]["Close"]
+			elif not data[ticker]["Adj Close"].isna().all():
+				frames[ticker] = data[ticker]["Adj Close"]
+		else:
+			if not data["Close"].isna().all():
+				frames[ticker] = data["Close"]
+			elif not data["Adj Close"].isna().all():
+				frames[ticker] = data["Adj Close"]
+
+	return pd.concat(frames, axis=1) if frames else pd.DataFrame()
+
+
+def get_ranked_stock_data(
+	tickers: List[str],
+	period_days: int = 2,
+	day_period_years: int = 10,
+	threshold: float = 5.0,
+	top_k: int = 15,
+) -> Tuple[pd.DataFrame, List[str]]:
+	if not tickers:
+		return pd.DataFrame(), []
+
+	minute_data = yf.download(
+		tickers,
+		period=f"{period_days}d",
+		interval="1m",
+		progress=False,
+		group_by="ticker",
+		auto_adjust=False,
+	)
+
+	if minute_data.empty:
+		return pd.DataFrame(), []
+
+	range_scores = {}
+	is_multi = isinstance(minute_data.columns, pd.MultiIndex)
+	for ticker in tickers:
+		if is_multi:
+			if ticker not in minute_data.columns.get_level_values(0):
+				continue
+			if not minute_data[ticker]["Close"].isna().all():
+				close_prices = minute_data[ticker]["Close"]
+			elif not minute_data[ticker]["Adj Close"].isna().all():
+				close_prices = minute_data[ticker]["Adj Close"]
+			else:
+				continue
+		else:
+			if not minute_data["Close"].isna().all():
+				close_prices = minute_data["Close"]
+			elif not minute_data["Adj Close"].isna().all():
+				close_prices = minute_data["Adj Close"]
+			else:
+				continue
+
+		clean = close_prices.dropna()
+		if clean.empty:
+			continue
+
+		price_range = clean.max() - clean.min()
+		if price_range > threshold:
+			range_scores[ticker] = price_range
+
+	if not range_scores:
+		return pd.DataFrame(), []
+
+	ranked = sorted(range_scores.items(), key=lambda x: x[1], reverse=True)
+	ranked_tickers = [ticker for ticker, _ in ranked[:top_k]]
+
+	day_data = yf.download(
+		ranked_tickers,
+		period=f"{day_period_years}y",
+		progress=False,
+		group_by="ticker",
+		auto_adjust=False,
+	)
+
+	if day_data.empty:
+		return pd.DataFrame(), ranked_tickers
+
+	day_df = _extract_close(day_data, ranked_tickers)
+	return day_df, ranked_tickers
 
 
 def load_industry_map() -> Dict[str, str]:
