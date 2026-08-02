@@ -127,6 +127,26 @@ def _init_sentiment_state() -> None:
 		st.session_state.sentiment_results = {}
 	if "sentiment_last_fetched" not in st.session_state:
 		st.session_state.sentiment_last_fetched = None
+	if "av_api_key" not in st.session_state:
+		st.session_state.av_api_key = ""
+
+
+def _load_av_api_key() -> str:
+	"""Resolve API key once into session_state so it is not re-entered every rerun."""
+	if st.session_state.get("av_api_key"):
+		return st.session_state.av_api_key
+
+	key = backend.get_alpha_vantage_api_key()
+	try:
+		secret_key = st.secrets["ALPHAVANTAGE_API_KEY"]
+		if secret_key:
+			key = key or str(secret_key).strip()
+	except Exception:
+		pass
+
+	if key:
+		st.session_state.av_api_key = key.strip()
+	return st.session_state.get("av_api_key", "")
 
 
 def _format_published(value: str) -> str:
@@ -141,6 +161,54 @@ def _format_published(value: str) -> str:
 	return formatted
 
 
+def _render_sentiment_results(tickers: list, results: dict) -> None:
+	st.markdown("#### Results")
+	if st.session_state.sentiment_last_fetched:
+		st.caption(
+			f"Showing cached results from {st.session_state.sentiment_last_fetched}. "
+			"Click Search only when you want a fresh pull."
+		)
+
+	display_tickers = list(tickers) if tickers else list(results.keys())
+	for ticker in display_tickers:
+		payload = results.get(ticker)
+		if payload is None:
+			st.warning(f"{ticker}: no cached result — click Search to load.")
+			continue
+
+		score = payload.get("sentiment_score")
+		label = payload.get("sentiment_label") or "—"
+		score_text = f"{score:.3f}" if isinstance(score, (int, float)) else "—"
+		st.markdown(f"**{ticker}** — sentiment: {label} ({score_text})")
+
+		if payload.get("error"):
+			st.error(payload["error"])
+			continue
+
+		articles = payload.get("articles") or []
+		if not articles:
+			st.info("No news articles returned.")
+			continue
+
+		rows = []
+		for article in articles:
+			rows.append(
+				{
+					"Published": _format_published(article.get("published", "")),
+					"Title": article.get("title", ""),
+					"Source": article.get("source", ""),
+					"Ticker sentiment": article.get("ticker_sentiment_label")
+					or article.get("overall_sentiment_label")
+					or "—",
+					"Score": article.get("ticker_sentiment_score")
+					if article.get("ticker_sentiment_score") is not None
+					else article.get("overall_sentiment_score"),
+					"URL": article.get("url", ""),
+				}
+			)
+		st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def _render_sentiment() -> None:
 	st.markdown("### Sentiment")
 	st.caption(
@@ -148,25 +216,20 @@ def _render_sentiment() -> None:
 		"NEWS_SENTIMENT call per ticker and stay cached until you click Search."
 	)
 	_init_sentiment_state()
+	api_key = _load_av_api_key()
 
-	api_key = backend.get_alpha_vantage_api_key()
-	try:
-		if hasattr(st, "secrets") and "ALPHAVANTAGE_API_KEY" in st.secrets:
-			api_key = api_key or str(st.secrets["ALPHAVANTAGE_API_KEY"]).strip()
-	except Exception:
-		pass
-
-	with st.expander("API key", expanded=not bool(api_key)):
+	if api_key:
+		st.caption("API key loaded (secrets / session).")
+	else:
 		entered_key = st.text_input(
 			"Alpha Vantage API key",
 			type="password",
-			value="",
-			placeholder="Set ALPHAVANTAGE_API_KEY or paste here",
+			placeholder="Paste once — it is kept in this session",
 			key="sentiment_api_key_input",
-			help="Used only for NEWS_SENTIMENT. Prefer env var / Streamlit secrets.",
 		)
 		if entered_key.strip():
-			api_key = entered_key.strip()
+			st.session_state.av_api_key = entered_key.strip()
+			api_key = st.session_state.av_api_key
 
 	st.markdown("#### Watchlist")
 	add_col, remove_col = st.columns(2)
@@ -204,7 +267,7 @@ def _render_sentiment() -> None:
 	if st.session_state.sentiment_tickers:
 		st.write(", ".join(st.session_state.sentiment_tickers))
 
-	btn_col, apply_col, status_col = st.columns([1, 1, 3])
+	btn_col, status_col = st.columns([1, 4])
 	with btn_col:
 		search_clicked = st.button(
 			"Search",
@@ -212,21 +275,18 @@ def _render_sentiment() -> None:
 			key="sentiment_search_btn",
 			disabled=not st.session_state.sentiment_tickers,
 		)
-	with apply_col:
-		apply_clicked = st.button(
-			"Apply",
-			key="sentiment_apply_btn",
-			disabled=not st.session_state.sentiment_tickers,
-		)
 	with status_col:
 		if st.session_state.sentiment_last_fetched:
 			st.caption(f"Cached results from {st.session_state.sentiment_last_fetched}")
 		else:
-			st.caption("No cached results yet. Click Search or Apply to load news.")
+			st.caption("No cached results yet. Click Search to load news.")
 
-	if search_clicked or apply_clicked:
+	if search_clicked:
 		if not api_key:
-			st.error("Alpha Vantage API key is required.")
+			st.error(
+				"Alpha Vantage API key is required. "
+				"Add it to .streamlit/secrets.toml or paste it above."
+			)
 		else:
 			with st.spinner("Fetching news & sentiment (one API call per ticker)..."):
 				st.session_state.sentiment_results = backend.fetch_watchlist_news_sentiment(
@@ -239,47 +299,8 @@ def _render_sentiment() -> None:
 				)
 
 	results = st.session_state.sentiment_results
-	if not results:
-		return
-
-	st.markdown("#### Results")
-	for ticker in st.session_state.sentiment_tickers:
-		payload = results.get(ticker)
-		if payload is None:
-			st.warning(f"{ticker}: no cached result — click Search or Apply to load.")
-			continue
-
-		score = payload.get("sentiment_score")
-		label = payload.get("sentiment_label") or "—"
-		score_text = f"{score:.3f}" if isinstance(score, (int, float)) else "—"
-		st.markdown(f"**{ticker}** — sentiment: {label} ({score_text})")
-
-		if payload.get("error"):
-			st.error(payload["error"])
-			continue
-
-		articles = payload.get("articles") or []
-		if not articles:
-			st.info("No news articles returned.")
-			continue
-
-		rows = []
-		for article in articles:
-			rows.append(
-				{
-					"Published": _format_published(article.get("published", "")),
-					"Title": article.get("title", ""),
-					"Source": article.get("source", ""),
-					"Ticker sentiment": article.get("ticker_sentiment_label")
-					or article.get("overall_sentiment_label")
-					or "—",
-					"Score": article.get("ticker_sentiment_score")
-					if article.get("ticker_sentiment_score") is not None
-					else article.get("overall_sentiment_score"),
-					"URL": article.get("url", ""),
-				}
-			)
-		st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+	if results:
+		_render_sentiment_results(st.session_state.sentiment_tickers, results)
 
 
 def render_app() -> None:
