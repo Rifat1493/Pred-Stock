@@ -120,6 +120,168 @@ def _render_dividends():
 	st.dataframe(filtered, use_container_width=True)
 
 
+def _init_sentiment_state() -> None:
+	if "sentiment_tickers" not in st.session_state:
+		st.session_state.sentiment_tickers = []
+	if "sentiment_results" not in st.session_state:
+		st.session_state.sentiment_results = {}
+	if "sentiment_last_fetched" not in st.session_state:
+		st.session_state.sentiment_last_fetched = None
+
+
+def _format_published(value: str) -> str:
+	if not value or len(value) < 8:
+		return value or ""
+	# Alpha Vantage: YYYYMMDDTHHMMSS
+	date_part = value[:8]
+	time_part = value[9:15] if "T" in value and len(value) >= 15 else ""
+	formatted = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]}"
+	if time_part:
+		formatted += f" {time_part[:2]}:{time_part[2:4]}"
+	return formatted
+
+
+def _render_sentiment() -> None:
+	st.markdown("### Sentiment")
+	st.caption(
+		"TSX watchlist (.TO). News and sentiment come from one Alpha Vantage "
+		"NEWS_SENTIMENT call per ticker and stay cached until you click Search."
+	)
+	_init_sentiment_state()
+
+	api_key = backend.get_alpha_vantage_api_key()
+	try:
+		if hasattr(st, "secrets") and "ALPHAVANTAGE_API_KEY" in st.secrets:
+			api_key = api_key or str(st.secrets["ALPHAVANTAGE_API_KEY"]).strip()
+	except Exception:
+		pass
+
+	with st.expander("API key", expanded=not bool(api_key)):
+		entered_key = st.text_input(
+			"Alpha Vantage API key",
+			type="password",
+			value="",
+			placeholder="Set ALPHAVANTAGE_API_KEY or paste here",
+			key="sentiment_api_key_input",
+			help="Used only for NEWS_SENTIMENT. Prefer env var / Streamlit secrets.",
+		)
+		if entered_key.strip():
+			api_key = entered_key.strip()
+
+	st.markdown("#### Watchlist")
+	add_col, remove_col = st.columns(2)
+	with add_col:
+		new_ticker = st.text_input(
+			"Add ticker",
+			placeholder="e.g. CNR or CNR.TO",
+			key="sentiment_add_ticker",
+		)
+		if st.button("Add", key="sentiment_add_btn"):
+			normalized = backend.normalize_tsx_ticker(new_ticker)
+			if not normalized:
+				st.warning("Enter a ticker.")
+			elif normalized in st.session_state.sentiment_tickers:
+				st.warning(f"{normalized} is already in the watchlist.")
+			else:
+				st.session_state.sentiment_tickers.append(normalized)
+				st.success(f"Added {normalized}.")
+
+	with remove_col:
+		if st.session_state.sentiment_tickers:
+			to_remove = st.selectbox(
+				"Remove ticker",
+				options=st.session_state.sentiment_tickers,
+				key="sentiment_remove_select",
+			)
+			if st.button("Delete", key="sentiment_remove_btn"):
+				st.session_state.sentiment_tickers = [
+					t for t in st.session_state.sentiment_tickers if t != to_remove
+				]
+				st.success(f"Removed {to_remove}.")
+		else:
+			st.info("No tickers yet. Add a TSX symbol above.")
+
+	if st.session_state.sentiment_tickers:
+		st.write(", ".join(st.session_state.sentiment_tickers))
+
+	btn_col, apply_col, status_col = st.columns([1, 1, 3])
+	with btn_col:
+		search_clicked = st.button(
+			"Search",
+			type="primary",
+			key="sentiment_search_btn",
+			disabled=not st.session_state.sentiment_tickers,
+		)
+	with apply_col:
+		apply_clicked = st.button(
+			"Apply",
+			key="sentiment_apply_btn",
+			disabled=not st.session_state.sentiment_tickers,
+		)
+	with status_col:
+		if st.session_state.sentiment_last_fetched:
+			st.caption(f"Cached results from {st.session_state.sentiment_last_fetched}")
+		else:
+			st.caption("No cached results yet. Click Search or Apply to load news.")
+
+	if search_clicked or apply_clicked:
+		if not api_key:
+			st.error("Alpha Vantage API key is required.")
+		else:
+			with st.spinner("Fetching news & sentiment (one API call per ticker)..."):
+				st.session_state.sentiment_results = backend.fetch_watchlist_news_sentiment(
+					st.session_state.sentiment_tickers,
+					api_key=api_key,
+					limit=5,
+				)
+				st.session_state.sentiment_last_fetched = pd.Timestamp.now().strftime(
+					"%Y-%m-%d %H:%M:%S"
+				)
+
+	results = st.session_state.sentiment_results
+	if not results:
+		return
+
+	st.markdown("#### Results")
+	for ticker in st.session_state.sentiment_tickers:
+		payload = results.get(ticker)
+		if payload is None:
+			st.warning(f"{ticker}: no cached result — click Search or Apply to load.")
+			continue
+
+		score = payload.get("sentiment_score")
+		label = payload.get("sentiment_label") or "—"
+		score_text = f"{score:.3f}" if isinstance(score, (int, float)) else "—"
+		st.markdown(f"**{ticker}** — sentiment: {label} ({score_text})")
+
+		if payload.get("error"):
+			st.error(payload["error"])
+			continue
+
+		articles = payload.get("articles") or []
+		if not articles:
+			st.info("No news articles returned.")
+			continue
+
+		rows = []
+		for article in articles:
+			rows.append(
+				{
+					"Published": _format_published(article.get("published", "")),
+					"Title": article.get("title", ""),
+					"Source": article.get("source", ""),
+					"Ticker sentiment": article.get("ticker_sentiment_label")
+					or article.get("overall_sentiment_label")
+					or "—",
+					"Score": article.get("ticker_sentiment_score")
+					if article.get("ticker_sentiment_score") is not None
+					else article.get("overall_sentiment_score"),
+					"URL": article.get("url", ""),
+				}
+			)
+		st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def render_app() -> None:
     st.set_page_config(page_title="TSX Stocks", layout="wide")
 
@@ -164,7 +326,9 @@ def render_app() -> None:
         _render_exploration()
     with tabs[1]:
         _render_dividends()
-
-    for tab in tabs[2:]:
-        with tab:
-            st.write("")
+    with tabs[2]:
+        st.write("")
+    with tabs[3]:
+        _render_sentiment()
+    with tabs[4]:
+        st.write("")
